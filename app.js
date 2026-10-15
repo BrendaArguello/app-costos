@@ -133,6 +133,28 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error("Error al guardar proceso:", error);
         }
     });
+
+    // GUARDAR TRABAJADOR CON DESGLOSE DE JORNADA
+    document.getElementById('worker-form')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const name = document.getElementById('wrk-name').value;
+        const startDate = document.getElementById('wrk-date').value;
+        const dailyWage = parseFloat(document.getElementById('wrk-wage').value);
+        
+        const shiftSelect = document.getElementById('wrk-shift');
+        const shiftType = shiftSelect ? shiftSelect.value : 'Diurna';
+
+        const calc = calculateWorkerCHH(dailyWage, startDate, shiftType);
+        const newWorker = { name, startDate, dailyWage, ...calc, createdAt: new Date() };
+
+        try {
+            await window.fs.addDoc(window.fs.collection(window.db, "trabajadores"), newWorker);
+            document.getElementById('worker-form').reset();
+            await loadWorkersFromFirebase();
+        } catch (error) {
+            console.error("Error al guardar trabajador:", error);
+        }
+    });
 });
 
 // NAVEGACIÓN DE MÓDULOS
@@ -152,7 +174,10 @@ window.switchModule = function(moduleName) {
     if (activeBtn) activeBtn.className = "px-3 py-1.5 text-xs font-bold rounded transition bg-blue-800 text-white";
 
     if (moduleName === 'procesos') renderProcesosModule();
-    if (moduleName === 'reportes') actualizarCedulaProducto();
+    if (moduleName === 'reportes') {
+        actualizarCedulaProducto();
+        renderReportesLaborales();
+    }
 };
 
 // MÓDULO DE PROCESOS: RENDERIZADO Y ASIGNACIÓN
@@ -303,6 +328,57 @@ window.actualizarCedulaProducto = function() {
     if (lblCostoFinal) lblCostoFinal.innerText = `$${costoFinal.toFixed(2)} MXN`;
 };
 
+// CÁLCULO DE DÍAS LABORALES Y VACACIONES DIGNAS (LFT)
+function getVacationDays(startDate) {
+    const start = new Date(startDate);
+    const now = new Date();
+    const diffTime = Math.abs(now - start);
+    const years = Math.floor(diffTime / (1000 * 60 * 60 * 24 * 365.25));
+
+    if (years < 1) return 12; 
+    if (years === 1) return 12;
+    if (years === 2) return 14;
+    if (years === 3) return 16;
+    if (years === 4) return 18;
+    if (years === 5) return 20;
+    if (years >= 6 && years <= 10) return 22;
+    if (years >= 11 && years <= 15) return 24;
+    return 26;
+}
+
+function calculateWorkerCHH(dailyWage, startDate, shiftType) {
+    let jornadaHoras = 8;
+    if (shiftType === 'Nocturna') jornadaHoras = 7;
+    if (shiftType === 'Mixta') jornadaHoras = 7.5;
+
+    const domingos = 52;
+    const festivosLFT = 7; 
+    const vacaciones = getVacationDays(startDate);
+    const diasInhabiles = domingos + festivosLFT + vacaciones;
+    
+    const diasLab = 365 - diasInhabiles;
+    
+    const sueldoAnual = dailyWage * 365;
+    const aguinaldo = dailyWage * 15;
+    const primaVacacional = (dailyWage * vacaciones) * 0.25;
+    const subtotalLey = sueldoAnual + aguinaldo + primaVacacional;
+
+    const comedorAnual = 48 * 19.83 * 12;
+    const valesAnual = 1200 * 12;
+    const eqSeguridad = 1720;
+
+    const cargasPatronales = subtotalLey * 0.14; 
+    const salarioIntegradoAnual = subtotalLey + comedorAnual + valesAnual + cargasPatronales + eqSeguridad;
+
+    const salarioIntegradoDiario = salarioIntegradoAnual / diasLab;
+    const chh = salarioIntegradoDiario / jornadaHoras; 
+
+    return { 
+        sueldoAnual, subtotalLey, cargasPatronales, salarioIntegradoAnual, 
+        salarioIntegradoDiario, chh, diasLab, vacaciones, jornada: shiftType, horasJornada: jornadaHoras 
+    };
+}
+
 // FIRESTORE: CARGA Y PERSISTENCIA
 async function loadProductsFromFirebase() {
     try {
@@ -341,12 +417,10 @@ async function loadWorkersFromFirebase() {
                 tr.className = "border-b border-slate-300";
                 tr.innerHTML = `
                     <td class="p-2 border font-bold text-left">${w.name}</td>
+                    <td class="p-2 border text-xs text-slate-500">${w.jornada || 'Diurna'} (${w.horasJornada || 8}h)</td>
+                    <td class="p-2 border font-semibold text-amber-700">${w.diasLab || 302} d</td>
                     <td class="p-2 border">$${w.dailyWage.toFixed(2)}</td>
-                    <td class="p-2 border">$${w.sueldoAnual.toFixed(2)}</td>
-                    <td class="p-2 border">$${w.subtotalLey.toFixed(2)}</td>
-                    <td class="p-2 border">$${w.cargasPatronales.toFixed(2)}</td>
                     <td class="p-2 border">$${w.salarioIntegradoAnual.toFixed(2)}</td>
-                    <td class="p-2 border bg-slate-100 font-bold">$${w.salarioIntegradoDiario.toFixed(2)}</td>
                     <td class="p-2 border bg-emerald-100 text-emerald-900 font-extrabold">$${w.chh.toFixed(2)}</td>`;
                 tbody.appendChild(tr);
             }
@@ -354,6 +428,7 @@ async function loadWorkersFromFirebase() {
 
         renderProcesosModule();
         actualizarCedulaProducto();
+        renderReportesLaborales();
     } catch (error) {
         console.error("Error al cargar trabajadores:", error);
     }
@@ -487,45 +562,56 @@ async function renderAllCards() {
     }
 }
 
-function calculateWorkerCHH(dailyWage) {
-    const diasLab = 302;
-    const jornada = 8;
-    
-    const sueldoAnual = dailyWage * 365;
-    const aguinaldo = dailyWage * 15;
-    const primaVacacional = (dailyWage * 12) * 0.25;
-    const subtotalLey = sueldoAnual + aguinaldo + primaVacacional;
+// GENERACIÓN DE REPORTES LABORALES
+function renderReportesLaborales() {
+    const reportesContainer = document.getElementById('reportes-laborales-container');
+    if (!reportesContainer) return;
 
-    const comedorAnual = 48 * 19.83 * 12;
-    const valesAnual = 1200 * 12;
-    const eqSeguridad = 1720;
-
-    const cargasPatronales = subtotalLey * 0.14;
-    const salarioIntegradoAnual = subtotalLey + comedorAnual + valesAnual + cargasPatronales + eqSeguridad;
-
-    const salarioIntegradoDiario = salarioIntegradoAnual / diasLab;
-    const chh = salarioIntegradoDiario / jornada;
-
-    return { sueldoAnual, subtotalLey, cargasPatronales, salarioIntegradoAnual, salarioIntegradoDiario, chh };
-}
-
-document.getElementById('worker-form')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const name = document.getElementById('wrk-name').value;
-    const startDate = document.getElementById('wrk-date').value;
-    const dailyWage = parseFloat(document.getElementById('wrk-wage').value);
-
-    const calc = calculateWorkerCHH(dailyWage);
-    const newWorker = { name, startDate, dailyWage, ...calc, createdAt: new Date() };
-
-    try {
-        await window.fs.addDoc(window.fs.collection(window.db, "trabajadores"), newWorker);
-        document.getElementById('worker-form').reset();
-        await loadWorkersFromFirebase();
-    } catch (error) {
-        console.error("Error al guardar trabajador:", error);
+    if (state.workers.length === 0) {
+        reportesContainer.innerHTML = '<p class="text-slate-500">No hay trabajadores para reportar.</p>';
+        return;
     }
-});
+
+    let filas = '';
+    state.workers.forEach(w => {
+        filas += `
+            <tr class="border-b border-slate-200">
+                <td class="p-2 border-l border-r border-slate-300 text-left font-bold">${w.name}</td>
+                <td class="p-2 border-r border-slate-300">${w.startDate}</td>
+                <td class="p-2 border-r border-slate-300 text-blue-800 font-semibold">${w.vacaciones} días</td>
+                <td class="p-2 border-r border-slate-300 text-slate-600">365 - 52 (Dom) - 7 (Fest) - ${w.vacaciones} (Vac)</td>
+                <td class="p-2 border-r border-slate-300 font-bold">${w.diasLab} días</td>
+                <td class="p-2 border-r border-slate-300">${w.jornada} (${w.horasJornada} hrs)</td>
+                <td class="p-2 border-r border-slate-300 font-bold text-emerald-700">$${w.chh.toFixed(2)}</td>
+            </tr>
+        `;
+    });
+
+    reportesContainer.innerHTML = `
+        <div class="mt-8 bg-white border border-slate-300 rounded-lg overflow-hidden shadow-sm">
+            <div class="bg-slate-800 px-4 py-3 border-b border-slate-700 flex justify-between items-center">
+                <h3 class="font-bold text-white">Reporte de Desglose de Mano de Obra (LFT)</h3>
+                <button onclick="window.print()" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded transition">Imprimir Reporte</button>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs text-center border-collapse">
+                    <thead class="bg-slate-100 text-slate-700 font-bold">
+                        <tr class="border-b border-slate-300">
+                            <th class="p-2 border-l border-r border-slate-300">Operador</th>
+                            <th class="p-2 border-r border-slate-300">Ingreso</th>
+                            <th class="p-2 border-r border-slate-300">Vacaciones (LFT)</th>
+                            <th class="p-2 border-r border-slate-300">Fórmula Días Inhábiles</th>
+                            <th class="p-2 border-r border-slate-300">Días Laborables Reales</th>
+                            <th class="p-2 border-r border-slate-300">Tipo de Jornada</th>
+                            <th class="p-2 border-r border-slate-300">CHH Resultante</th>
+                        </tr>
+                    </thead>
+                    <tbody>${filas}</tbody>
+                </table>
+            </div>
+        </div>
+    `;
+}
 
 // ESCÁNER QR
 let html5QrCode = null;
